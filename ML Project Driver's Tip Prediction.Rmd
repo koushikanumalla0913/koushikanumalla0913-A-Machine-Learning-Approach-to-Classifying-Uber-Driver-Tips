@@ -1,0 +1,633 @@
+Reading the Dataset.
+```{r}
+uber_Data = read.csv("E:\\ML Course\\ML project\\uber_data_full.csv")
+uber_Data = data.frame(uber_Data)
+str(uber_Data)
+summary(uber_Data)
+```
+Splitting Date and Time.
+```{r}
+library(dplyr)
+library(lubridate)
+
+uber_Data = uber_Data %>%
+  mutate(
+    tip_given = ifelse(tip_amount > 0, 1, 0),
+    
+
+    pickup_date = as.Date(ymd_hms(tpep_pickup_datetime)),
+    dropoff_date = as.Date(ymd_hms(tpep_dropoff_datetime)),
+    
+
+    pickup_day_of_week = wday(ymd_hms(tpep_pickup_datetime)),
+    dropoff_day_of_week = wday(ymd_hms(tpep_dropoff_datetime)),
+    
+    
+    ride_duration = as.numeric(difftime(ymd_hms(tpep_dropoff_datetime), ymd_hms(tpep_pickup_datetime), units = "mins")),
+    
+
+    pickup_time_bin = case_when(
+      hour(ymd_hms(tpep_pickup_datetime)) >= 0 & hour(ymd_hms(tpep_pickup_datetime)) < 6 ~ "Early Morning",
+      hour(ymd_hms(tpep_pickup_datetime)) >= 6 & hour(ymd_hms(tpep_pickup_datetime)) < 12 ~ "Morning",
+      hour(ymd_hms(tpep_pickup_datetime)) >= 12 & hour(ymd_hms(tpep_pickup_datetime)) < 18 ~ "Afternoon",
+      hour(ymd_hms(tpep_pickup_datetime)) >= 18 & hour(ymd_hms(tpep_pickup_datetime)) <= 23 ~ "Evening",
+      TRUE ~ "Unknown"
+    )
+  )
+
+
+uber_Data = subset(uber_Data, select = -c(tpep_pickup_datetime, tpep_dropoff_datetime))
+str(uber_Data)
+summary(uber_Data)
+```
+
+```{r}
+#Removing geographical address from data set to avoid unnecessary complexity or overfitting in the model
+uber_Data = uber_Data[, !(names(uber_Data) %in% c("pickup_longitude", "pickup_latitude", "dropoff_longitude", "dropoff_latitude"))]
+#Removing RatecodeID a noise with only one record. its uninformative.
+uber_Data = uber_Data[uber_Data$RatecodeID != 6, ]
+
+```
+Missing Values.
+```{r}
+missingValues = colSums(is.na(uber_Data) | uber_Data  == "")
+missingValues
+```
+Removing negative fairs and Duplicates associated in fare_amount.
+```{r}
+duplicates = uber_Data[duplicated(uber_Data), ]
+nrow(duplicates)
+uber_Data = uber_Data[!duplicated(uber_Data), ]
+cat("Number of rows after removing duplicates: ", nrow(uber_Data), "\n")
+
+
+uber_Data = uber_Data[uber_Data$fare_amount >= 0, ]
+nrow(uber_Data)
+```
+
+Spliting the dataset into train and test
+```{r}
+library(caret)
+set.seed(1998)
+
+inTrain = createDataPartition(uber_Data$tip_given, p=0.70, list=FALSE) 
+uber_trainData = uber_Data[inTrain,]
+uber_testData = uber_Data[-inTrain,]
+
+cat("\n Dimensions of uber_trainData are ",dim(uber_trainData))
+cat("\n Dimensions of uber_testData are ",dim(uber_testData))
+
+```
+
+calculate percentage of levels in target variable.
+```{r}
+
+level_counts = table(uber_trainData$tip_given)
+level_percentages = prop.table(level_counts) * 100
+print(level_percentages)
+
+```
+Calculating and Removing the Outliers from train data only.
+```{r}
+set.seed(1998)
+calculate_bounds = function(data, column) {
+  col_IQR = IQR(data[[column]], na.rm = TRUE)
+  lower = quantile(data[[column]], 0.25, na.rm = TRUE) - 1.5 * col_IQR
+  upper = quantile(data[[column]], 0.75, na.rm = TRUE) + 1.5 * col_IQR
+  return(list(lower = lower, upper = upper))
+}
+
+
+cap_outliers_with_bounds = function(data, column, bounds) {
+  data[[column]] = ifelse(data[[column]] < bounds$lower, bounds$lower,
+                           ifelse(data[[column]] > bounds$upper, bounds$upper, data[[column]]))
+  return(data)
+}
+
+
+columns_to_check = c("fare_amount", "total_amount", "ride_duration", 
+                     "trip_distance", "tip_amount", "tolls_amount")
+
+
+outlier_bounds = list()
+
+for (col in columns_to_check) {
+  outlier_bounds[[col]] = calculate_bounds(uber_trainData, col)
+
+  uber_trainData = cap_outliers_with_bounds(uber_trainData, col, outlier_bounds[[col]])
+  cat("Bounds for", col, ":", outlier_bounds[[col]]$lower, "to", outlier_bounds[[col]]$upper, "\n")
+}
+
+
+for (col in columns_to_check) {
+  uber_testData = cap_outliers_with_bounds(uber_testData, col, outlier_bounds[[col]])
+}
+
+
+summary(uber_trainData[, columns_to_check])
+
+
+boxplot(uber_trainData$fare_amount, main = "Fare Amount", ylab = "Fare Amount")
+boxplot(uber_trainData$total_amount, main = "Total Amount", ylab = "Total Amount")
+boxplot(uber_trainData$ride_duration, main = "Ride Duration", ylab = "Ride Duration")
+boxplot(uber_trainData$trip_distance, main = "Trip Distance", ylab = "Trip Distance")
+boxplot(uber_trainData$tip_amount, main = "Tip Amount", ylab = "Tip Amount")
+boxplot(uber_trainData$tolls_amount, main = "Tolls Amount", ylab = "Tolls Amount")
+```
+```{r}
+#Bounds for tolls_amount : 0 to 0 
+uber_trainData = subset(uber_trainData, select = -c(tolls_amount))
+uber_testData = subset(uber_testData, select = -c(tolls_amount))
+
+
+#numeric_vars = setdiff(numeric_vars, c("tolls_amount"))
+```
+
+Converting categorical variable to Factors.
+```{r}
+set.seed(1998)
+categoricalOrdinalVariables = c("pickup_time_bin", "pickup_date", "dropoff_date")
+categoricalNominalVariables = c(
+  "VendorID", 
+  "RatecodeID", 
+  "store_and_fwd_flag", 
+  "payment_type",
+  "pickup_day_of_week", "dropoff_day_of_week",
+  "tip_given"
+)
+
+
+allCategoricalVariables = c(categoricalOrdinalVariables, categoricalNominalVariables)
+
+
+uber_trainData[allCategoricalVariables] = lapply(uber_trainData[allCategoricalVariables], factor)
+uber_testData[allCategoricalVariables] = lapply(uber_testData[allCategoricalVariables], factor)
+
+
+str(uber_trainData)
+
+```
+
+Performing Statistical Anlaysis on train data only.
+```{r}
+library(dplyr)
+
+results = data.frame(Variable = character(),
+                      Test = character(),
+                      PValue = numeric(),
+                      Decision = character(),
+                      stringsAsFactors = FALSE)
+
+
+categoricalNominalVariables = c(
+  "VendorID", "RatecodeID", "store_and_fwd_flag", "payment_type",
+  "pickup_day_of_week", "dropoff_day_of_week"
+)
+
+for (var in categoricalNominalVariables) {
+  contingency_table = table(uber_trainData[[var]], uber_trainData$tip_given)
+  chi_square_result = chisq.test(contingency_table)
+  decision = ifelse(chi_square_result$p.value < 0.05, "Keep", "Exclude")
+  results = rbind(results, data.frame(Variable = var, 
+                                       Test = "Chi-Square", 
+                                       PValue = chi_square_result$p.value,
+                                       Decision = decision))
+  
+  mosaicplot(contingency_table, main = var, xlab = "Tip Given", ylab = var, color = TRUE)
+}
+
+
+
+categoricalOrdinalVariables = c("pickup_time_bin", "pickup_date", "dropoff_date")
+
+for (var in categoricalOrdinalVariables) {
+  kruskal_result = kruskal.test(uber_trainData[[var]] ~ uber_trainData$tip_given)
+  decision = ifelse(kruskal_result$p.value < 0.05, "Keep", "Exclude")
+  results = rbind(results, data.frame(Variable = var, 
+                                       Test = "Kruskal-Wallis", 
+                                       PValue = kruskal_result$p.value,
+                                       Decision = decision))
+  
+
+  boxplot(uber_trainData[[var]] ~ uber_trainData$tip_given, 
+          main = paste("Distribution of", var, "by Tip Given"),
+          xlab = "Tip Given", ylab = var,
+          col = c("lightblue", "lightgreen"))
+}
+
+#numeric_vars = c("log_fare_amount", "log_trip_distance", "log_tip_amount", "log_total_amount",  "log_ride_duration", "sqrt_passenger_count", "sqrt_extra","log_mta_tax","log_improvement_surcharge")
+
+
+numeric_vars = c("fare_amount", "trip_distance", "tip_amount", "total_amount",  "ride_duration", "passenger_count", "extra","mta_tax","improvement_surcharge")
+
+for (var in numeric_vars) {
+  t_test_result = t.test(uber_trainData[[var]] ~ uber_trainData$tip_given)
+  decision = ifelse(t_test_result$p.value < 0.05, "Keep", "Exclude")
+  results = rbind(results, data.frame(Variable = var, 
+                                       Test = "T-test", 
+                                       PValue = t_test_result$p.value,
+                                       Decision = decision))
+  
+  
+  boxplot(uber_trainData[[var]] ~ uber_trainData$tip_given, 
+          main = paste("Distribution of", var, "by Tip Given"),
+          xlab = "Tip Given", ylab = var,
+          col = c("lightblue", "lightgreen"))
+}
+
+
+anova_result = aov(fare_amount  ~ payment_type, data = uber_trainData)
+summary(anova_result)
+
+
+boxplot(fare_amount  ~ payment_type, data = uber_trainData,
+        main = "Distribution of Fare Amount by Payment Type",
+        xlab = "Payment Type", ylab = "Fare Amount",
+        col = "lightblue")
+
+
+barplot(table(results$Decision), 
+        main = "Decision Based on Hypothesis Test Results", 
+        xlab = "Decision", ylab = "Count", 
+        col = c("green", "red"))
+
+
+dotchart(results$PValue, 
+         labels = results$Variable, 
+         main = "P-values for Each Variable's Test",
+         xlab = "P-value", ylab = "Variable",
+         pch = 16, col = ifelse(results$Decision == "Keep", "green", "red"))
+print(results)
+```
+Removing highly correlated attributes. 
+```{r}
+#uber_trainData = subset(uber_trainData, select = -c(passenger_count))
+#uber_testData = subset(uber_testData, select = -c(passenger_count))
+
+#numeric_vars = setdiff(numeric_vars, c("passenger_count"))
+
+```
+
+Performing one hot encoding seperately on both train and test for nominal attributes.
+```{r}
+set.seed(1998)
+library(mltools)
+library(data.table)
+
+one_hot_encode = function(data, cols) {
+  encoded_data = data.frame(
+    one_hot(data.table(data), cols = cols)
+  )
+  return(encoded_data)
+}
+
+categoricalNominalVariables = c(
+  "VendorID", 
+  "RatecodeID", 
+  "store_and_fwd_flag", 
+  "payment_type",
+  "pickup_day_of_week", "dropoff_day_of_week"
+)
+
+uber_trainDataEncoded = one_hot_encode(uber_trainData, categoricalNominalVariables)
+uber_testDataEncoded = one_hot_encode(uber_testData, categoricalNominalVariables)
+
+
+
+head(uber_trainDataEncoded)
+head(uber_testDataEncoded)
+
+
+colnames(uber_trainDataEncoded)
+colnames(uber_testDataEncoded)
+
+```
+Performing normalization on train and test.
+```{r}
+set.seed(1998)
+train_means = sapply(uber_trainDataEncoded[, numeric_vars], mean, na.rm = TRUE)
+train_sds = sapply(uber_trainDataEncoded[, numeric_vars], sd, na.rm = TRUE)
+
+normalize = function(data, means, sds) {
+  return((data - means) / sds)
+}
+
+uber_trainDataEncoded[, numeric_vars] = as.data.frame(
+  mapply(normalize, 
+         data = uber_trainDataEncoded[, numeric_vars], 
+         means = train_means, 
+         sds = train_sds)
+)
+
+uber_testDataEncoded[, numeric_vars] = as.data.frame(
+  mapply(normalize, 
+         data = uber_testDataEncoded[, numeric_vars], 
+         means = train_means, 
+         sds = train_sds)
+)
+summary(uber_trainDataEncoded[, numeric_vars])
+summary(uber_testDataEncoded[, numeric_vars])
+
+
+```
+Converting Categorical Variables to Ordered Factors.
+```{r}
+
+#categoricalOrdinalVariables = c("pickup_time_bin", "pickup_date", "dropoff_date")
+set.seed(1998)
+uber_trainDataEncoded$pickup_date = factor(
+  uber_trainDataEncoded$pickup_date, 
+  levels = c("2016-03-01", "2016-03-10"),  
+  ordered = TRUE
+)
+
+uber_testDataEncoded$pickup_date = factor(
+  uber_testDataEncoded$pickup_date, 
+  levels = c("2016-03-01", "2016-03-10"), 
+  ordered = TRUE
+)
+
+
+uber_trainDataEncoded$dropoff_date = factor(
+  uber_trainDataEncoded$dropoff_date, 
+  levels = c("2016-03-01", "2016-03-02", "2016-03-10", "2016-03-11"),  
+  ordered = TRUE
+)
+
+uber_testDataEncoded$dropoff_date = factor(
+  uber_testDataEncoded$dropoff_date, 
+  levels = c("2016-03-01", "2016-03-02", "2016-03-10", "2016-03-11"),  
+  ordered = TRUE
+)
+
+
+uber_trainDataEncoded$pickup_time_bin = factor(
+  uber_trainDataEncoded$pickup_time_bin, 
+  levels = c("Afternoon", "Early Morning", "Morning"), 
+  ordered = TRUE
+)
+
+uber_testDataEncoded$pickup_time_bin = factor(
+  uber_testDataEncoded$pickup_time_bin, 
+  levels = c("Afternoon", "Early Morning", "Morning"),  # New levels
+  ordered = TRUE
+)
+
+
+str(uber_trainDataEncoded$pickup_date)
+summary(uber_trainDataEncoded$pickup_date)
+
+str(uber_trainDataEncoded$dropoff_date)
+summary(uber_trainDataEncoded$dropoff_date)
+
+str(uber_trainDataEncoded$pickup_time_bin)
+summary(uber_trainDataEncoded$pickup_time_bin)
+```
+
+Converting Ordered Categorical Variables to Numeric.
+```{r}
+set.seed(1998)
+
+convertToNumeric = function(data) {
+  data$pickup_time_bin = as.numeric(data$pickup_time_bin)
+  data$pickup_date = as.numeric(data$pickup_date)
+  data$dropoff_date = as.numeric(data$dropoff_date)
+  #data$tip_given = as.numeric(data$tip_given)
+  return(data)
+}
+uber_trainDataEncoded = convertToNumeric(uber_trainDataEncoded)
+uber_testDataEncoded = convertToNumeric(uber_testDataEncoded)
+
+str(uber_trainDataEncoded)
+str(uber_testDataEncoded)
+
+```
+Handling the imbalance by under sampling the majority class.
+```{r}
+set.seed(1998)
+
+trainuber_DataWithLow = uber_trainDataEncoded[uber_trainDataEncoded$tip_given == "0", ]
+trainuber_DataWithHigh = uber_trainDataEncoded[uber_trainDataEncoded$tip_given == "1", ]
+
+nrow(trainuber_DataWithLow)
+nrow(trainuber_DataWithHigh)
+
+sampled_trainData = trainuber_DataWithHigh[sample(1:nrow(trainuber_DataWithLow), nrow(trainuber_DataWithLow)), ]
+balanced_trainData = rbind(sampled_trainData, trainuber_DataWithLow)
+
+```
+Training and Testing the Models
+```{r}
+library(glmnet)
+library(class)
+library(keras3)
+library(pROC)
+library(e1071)
+
+
+# Logistic Regression Model Function
+logistic_regression_model <- function(train_data, test_data, target_column) {
+  train_labels = as.numeric(train_data[[target_column]]) - 1
+  test_labels = as.numeric(test_data[[target_column]]) - 1
+  train_features = as.matrix(train_data[, !colnames(train_data) %in% target_column])
+  test_features = as.matrix(test_data[, !colnames(test_data) %in% target_column])
+
+  model = cv.glmnet(x = train_features, y = train_labels, family = "binomial", alpha = 0, type.measure = "class")
+  predictions = predict(model, newx = test_features, s = "lambda.min", type = "response")
+  predicted_labels = ifelse(predictions > 0.5, 1, 0)
+
+  confusion_matrix = table(Actual = test_labels, Predicted = predicted_labels)
+  accuracy = sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  precision = confusion_matrix[2, 2] / sum(confusion_matrix[2, ])
+  recall = confusion_matrix[2, 2] / sum(confusion_matrix[, 2])
+  f1_score = 2 * (precision * recall) / (precision + recall)
+
+  roc_curve = roc(test_labels, predictions)
+  auc = auc(roc_curve)
+
+  return(list(model = model, predictions = predictions, confusion_matrix = confusion_matrix, 
+              accuracy = accuracy, precision = precision, recall = recall, 
+              f1_score = f1_score, auc = auc, roc_curve = roc_curve))
+}
+
+# KNN Model Function
+knn_model = function(train_data, test_data, target_column, k_values) {
+  train_labels = as.numeric(train_data[[target_column]]) - 1
+  test_labels = as.numeric(test_data[[target_column]]) - 1
+  train_features = as.matrix(train_data[, !colnames(train_data) %in% target_column])
+  test_features = as.matrix(test_data[, !colnames(test_data) %in% target_column])
+
+  metrics = data.frame(k = integer(), accuracy = numeric())
+  for (k in k_values) {
+    predictions = knn(train = train_features, test = test_features, cl = train_labels, k = k)
+    accuracy = sum(as.numeric(predictions) == test_labels) / length(test_labels)
+    metrics = rbind(metrics, data.frame(k = k, accuracy = accuracy))
+  }
+  best_k = metrics[which.max(metrics$accuracy), "k"]
+  model = list(best_k = best_k)
+  predictions = knn(train = train_features, test = test_features, cl = train_labels, k = best_k)
+  predicted_labels = as.numeric(predictions)
+
+  confusion_matrix = table(Actual = test_labels, Predicted = predicted_labels)
+  accuracy = sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  precision = confusion_matrix[2, 2] / sum(confusion_matrix[2, ])
+  recall = confusion_matrix[2, 2] / sum(confusion_matrix[, 2])
+  f1_score = 2 * (precision * recall) / (precision + recall)
+
+  roc_curve = roc(test_labels, as.numeric(predictions))
+  auc = auc(roc_curve)
+
+  return(list(model = model, predictions = predictions, confusion_matrix = confusion_matrix, 
+              accuracy = accuracy, precision = precision, recall = recall, 
+              f1_score = f1_score, auc = auc, roc_curve = roc_curve))
+}
+
+#SVM
+svm_model = function(train_data, test_data, target_column) {
+  set.seed(1998)
+
+  train_labels = as.factor(train_data[[target_column]]) 
+  test_labels = as.factor(test_data[[target_column]])
+  
+
+  train_features = train_data[, !colnames(train_data) %in% target_column]
+  test_features = test_data[, !colnames(test_data) %in% target_column]
+  
+
+  
+  model = svm(train_features, y = train_labels, type = "C-classification", kernel = "radial", cost = 1, scale = TRUE)
+
+ 
+  predictions = predict(model, test_features)
+  predicted_labels = as.numeric(predictions) - 1
+
+
+  confusion_matrix = table(Actual = test_labels, Predicted = predicted_labels)
+  accuracy = sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  precision = confusion_matrix[2, 2] / sum(confusion_matrix[2, ])
+  recall = confusion_matrix[2, 2] / sum(confusion_matrix[, 2])
+  f1_score = 2 * (precision * recall) / (precision + recall)
+
+  roc_curve = roc(test_labels, as.numeric(predictions))
+  auc = auc(roc_curve)
+
+  return(list(model = model, predictions = predictions, confusion_matrix = confusion_matrix, 
+              accuracy = accuracy, precision = precision, recall = recall, 
+              f1_score = f1_score, auc = auc, roc_curve = roc_curve))
+}
+
+# Neural Network Model Function
+neural_network_model = function(train_data, test_data, target_column) {
+  train_labels = as.numeric(train_data[[target_column]]) - 1
+  test_labels = as.numeric(test_data[[target_column]]) - 1
+  train_features = as.matrix(train_data[, !colnames(train_data) %in% target_column])
+  test_features = as.matrix(test_data[, !colnames(test_data) %in% target_column])
+
+  model = keras_model_sequential() %>%
+    layer_dense(units = 512, activation = "relu", input_shape = c(ncol(train_features))) %>%
+    layer_dense(units = 256, activation = "relu") %>%
+    layer_dense(units = 128, activation = "relu") %>%
+    layer_dense(units = 32, activation = "relu") %>%
+    layer_dense(units = 1, activation = "sigmoid")
+  model %>% compile(optimizer = optimizer_adam(learning_rate = 0.0001), loss = 'binary_crossentropy', metrics = c('accuracy'))
+  model %>% fit(train_features, train_labels, epochs = 12, batch_size = 16, validation_split = 0.2, verbose = 0)
+
+  predictions = model %>% predict(test_features)
+  predicted_labels = ifelse(predictions > 0.5, 1, 0)
+
+  confusion_matrix = table(Actual = test_labels, Predicted = predicted_labels)
+  accuracy = sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  precision = confusion_matrix[2, 2] / sum(confusion_matrix[2, ])
+  recall = confusion_matrix[2, 2] / sum(confusion_matrix[, 2])
+  f1_score = 2 * (precision * recall) / (precision + recall)
+
+  roc_curve = roc(test_labels, predictions)
+  auc = auc(roc_curve)
+
+  return(list(model = model, predictions = predictions, confusion_matrix = confusion_matrix, 
+              accuracy = accuracy, precision = precision, recall = recall, 
+              f1_score = f1_score, auc = auc, roc_curve = roc_curve))
+}
+
+```
+
+```{r}
+
+set.seed(1998)
+result_svm = svm_model(train_data = balanced_trainData, test_data = uber_testDataEncoded, target_column = "tip_given")
+print(result_svm$confusion_matrix)
+cat("Accuracy:", result_svm$accuracy, "Precision:", result_svm$precision, "Recall:", result_svm$recall, "F1-Score:", result_svm$f1_score, "AUC:", result_svm$auc, "\n")
+
+
+set.seed(1998)
+logistic_results = logistic_regression_model(balanced_trainData, uber_testDataEncoded, "tip_given")
+cat("Logistic Regression Results:\n")
+print(logistic_results$confusion_matrix)
+cat("Accuracy:", logistic_results$accuracy, "Precision:", logistic_results$precision, "Recall:", logistic_results$recall, "F1-Score:", logistic_results$f1_score, "AUC:", logistic_results$auc, "\n")
+
+set.seed(1998)
+k_values = seq(50, 100, by = 10)
+knn_results = knn_model(balanced_trainData, uber_testDataEncoded, "tip_given", k_values)
+cat("\nKNN Results:\n")
+print(knn_results$confusion_matrix)
+cat("Accuracy:", knn_results$accuracy, "Precision:", knn_results$precision, "Recall:", knn_results$recall, "F1-Score:", knn_results$f1_score, "AUC:", knn_results$auc, "\n")
+```
+```{r}
+set.seed(1998)
+neural_results = neural_network_model(balanced_trainData, uber_testDataEncoded, "tip_given")
+cat("\nNeural Network Results:\n")
+print(neural_results$confusion_matrix)
+cat("Accuracy:", neural_results$accuracy, "Precision:", neural_results$precision, "Recall:", neural_results$recall, "F1-Score:", neural_results$f1_score, "AUC:", neural_results$auc, "\n")
+```
+Majority Classifier 
+```{r}
+set.seed(1998)
+majority_class = 1
+
+predictions = rep(majority_class, length(as.numeric(uber_testDataEncoded$tip_given) - 1))
+confusion_matrix = table(Actual = as.numeric(uber_testDataEncoded$tip_given) - 1, Predicted = predictions)
+
+accuracy = sum(diag(confusion_matrix)) / sum(confusion_matrix)
+
+print(confusion_matrix)
+print(paste("Accuracy:", accuracy))
+
+
+true_positives = confusion_matrix[2, 1]
+false_positives = confusion_matrix[1, 1] 
+false_negatives = confusion_matrix[2, 0] 
+
+precision = true_positives / (true_positives + false_positives)
+cat("Precision:", precision, "\n")
+
+```
+Comparision
+```{r}
+
+model_comparison_df = data.frame(
+  Model = c("Logistic Regression", "KNN", "Neural Network", "SVM"),
+  Accuracy = c(logistic_results$accuracy, knn_results$accuracy, neural_results$accuracy, result_svm$accuracy),
+  Precision = c(logistic_results$precision, knn_results$precision, neural_results$precision, result_svm$precision),
+  Recall = c(logistic_results$recall, knn_results$recall, neural_results$recall, result_svm$recall),
+  F1_Score = c(logistic_results$f1_score, knn_results$f1_score, neural_results$f1_score, result_svm$f1_score),
+  AUC = c(logistic_results$auc, knn_results$auc, neural_results$auc, result_svm$auc)
+)
+
+print(model_comparison_df)
+```
+Visualizing model
+```{r}
+library(ggplot2)
+library(reshape2)
+
+model_comparison_melted = melt(model_comparison_df, id.vars = "Model")
+
+ggplot(model_comparison_melted, aes(x = Model, y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Model Comparison: Accuracy, Precision, Recall, F1-Score, and AUC",
+       y = "Metric Value",
+       x = "Model") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
